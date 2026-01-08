@@ -190,15 +190,50 @@ export async function syncPendingOperations() {
         }
       } catch (error) {
         failed++;
+        const errorMsg = error.message || '';
+        const errorMsgLower = errorMsg.toLowerCase();
+        
         logger.error('[SyncService] Failed to sync operation', { 
           id: op.id, 
           operation: op.operation, 
-          error: error.message 
+          error: errorMsg,
+          status: error.status,
+          errorStack: error.stack
         });
         
-        // If error is not network-related, remove from queue
-        if (!error.message.includes('network') && !error.message.includes('fetch')) {
+        // Check if error is network-related or server error (should retry)
+        // The error message might be transformed by getFriendlyErrorMessage, so check for various patterns
+        const isNetworkError = error.status >= 500 || // Server errors (5xx)
+                               error.status === 502 || // Bad Gateway
+                               error.status === 503 || // Service Unavailable
+                               error.status === 504 || // Gateway Timeout
+                               errorMsgLower.includes('network') || 
+                               errorMsgLower.includes('fetch') ||
+                               errorMsgLower.includes('failed to fetch') ||
+                               errorMsgLower.includes('cors') ||
+                               errorMsgLower.includes('unable to connect') ||
+                               errorMsgLower.includes('connection') ||
+                               errorMsgLower.includes('timeout') ||
+                               !error.status; // No status usually means network error
+        
+        // Only remove from queue if it's NOT a network/server error (should retry)
+        // Keep network/server errors in queue for retry
+        if (!isNetworkError) {
+          logger.warn('[SyncService] Non-network error, removing from queue', { 
+            id: op.id, 
+            operation: op.operation,
+            error: errorMsg,
+            status: error.status
+          });
           await offlineQueue.dequeue(op.id);
+        } else {
+          logger.info('[SyncService] Network/server error, keeping in queue for retry', { 
+            id: op.id, 
+            operation: op.operation,
+            attempts: op.attempts || 0,
+            error: errorMsg,
+            status: error.status
+          });
         }
       }
     }
@@ -235,77 +270,69 @@ export async function syncFromServer() {
     logger.debug('[SyncService] Clearing all local properties before server sync');
     
     try {
-      // Check if clearAll exists (it should be exported from indexedDbRepository)
-      if (localRepo.clearAll && typeof localRepo.clearAll === 'function') {
-        await localRepo.clearAll();
-        logger.debug('[SyncService] Successfully cleared all properties using clearAll');
-      } else {
-        // Fallback: manually clear by deleting each property from IndexedDB directly
-        logger.info('[SyncService] clearAll not available, using fallback method');
-        
-        const localProps = await localRepo.getAll();
-        logger.debug('[SyncService] Found local properties to clear', { count: localProps.length });
-        
-        if (localProps.length > 0) {
-          // Direct IndexedDB access to clear without syncing to server
-          try {
-            const dbName = 'PropertyDB';
-            const storeName = 'properties';
-            
-            // Open IndexedDB directly
-            const dbRequest = indexedDB.open(dbName, 2);
-            await new Promise((resolve, reject) => {
-              dbRequest.onsuccess = () => {
-                const db = dbRequest.result;
-                const transaction = db.transaction([storeName], 'readwrite');
-                const objectStore = transaction.objectStore(storeName);
-                
-                // Delete each property
-                let deleted = 0;
-                let errors = 0;
-                
-                for (const prop of localProps) {
-                  const deleteRequest = objectStore.delete(prop.id);
-                  deleteRequest.onsuccess = () => deleted++;
-                  deleteRequest.onerror = () => {
-                    errors++;
-                    logger.warn('[SyncService] Error deleting property during clear', { id: prop.id });
-                  };
-                }
-                
-                transaction.oncomplete = () => {
-                  logger.info('[SyncService] Fallback clear completed', { deleted, errors, total: localProps.length });
-                  resolve();
+      // Direct IndexedDB access to clear without syncing to server
+      // This avoids dependency on clearAll export which might not be available in build
+      const localProps = await localRepo.getAll();
+      logger.debug('[SyncService] Found local properties to clear', { count: localProps.length });
+      
+      if (localProps.length > 0) {
+        try {
+          const dbName = 'PropertyDB';
+          const storeName = 'properties';
+          
+          // Open IndexedDB directly
+          const dbRequest = indexedDB.open(dbName, 2);
+          await new Promise((resolve, reject) => {
+            dbRequest.onsuccess = () => {
+              const db = dbRequest.result;
+              const transaction = db.transaction([storeName], 'readwrite');
+              const objectStore = transaction.objectStore(storeName);
+              
+              // Delete each property
+              let deleted = 0;
+              let errors = 0;
+              
+              for (const prop of localProps) {
+                const deleteRequest = objectStore.delete(prop.id);
+                deleteRequest.onsuccess = () => deleted++;
+                deleteRequest.onerror = () => {
+                  errors++;
+                  logger.warn('[SyncService] Error deleting property during clear', { id: prop.id });
                 };
-                
-                transaction.onerror = () => {
-                  logger.error('[SyncService] Transaction error during clear', { error: transaction.error });
-                  reject(transaction.error);
-                };
+              }
+              
+              transaction.oncomplete = () => {
+                logger.info('[SyncService] Successfully cleared properties', { deleted, errors, total: localProps.length });
+                resolve();
               };
               
-              dbRequest.onerror = () => {
-                logger.error('[SyncService] Failed to open IndexedDB for clear', { error: dbRequest.error });
-                reject(dbRequest.error);
+              transaction.onerror = () => {
+                logger.error('[SyncService] Transaction error during clear', { error: transaction.error });
+                reject(transaction.error);
               };
-            });
-          } catch (indexedDbError) {
-            logger.warn('[SyncService] Direct IndexedDB clear failed, using remove method', { error: indexedDbError.message });
-            // Last resort: use remove method (will sync to server, but that's okay since we're clearing anyway)
-            for (const prop of localProps) {
-              try {
-                await localRepo.remove(prop.id);
-              } catch (err) {
-                logger.warn('[SyncService] Error removing property during clear', { id: prop.id, error: err.message });
-              }
+            };
+            
+            dbRequest.onerror = () => {
+              logger.error('[SyncService] Failed to open IndexedDB for clear', { error: dbRequest.error });
+              reject(dbRequest.error);
+            };
+          });
+        } catch (indexedDbError) {
+          logger.warn('[SyncService] Direct IndexedDB clear failed, using remove method', { error: indexedDbError.message });
+          // Last resort: use remove method (will sync to server, but that's okay since we're clearing anyway)
+          for (const prop of localProps) {
+            try {
+              await localRepo.remove(prop.id);
+            } catch (err) {
+              logger.warn('[SyncService] Error removing property during clear', { id: prop.id, error: err.message });
             }
           }
         }
-        
-        // Clear cache
-        localRepo.clearCache();
-        logger.info('[SyncService] Successfully cleared properties using fallback method');
       }
+      
+      // Clear cache
+      localRepo.clearCache();
+      logger.info('[SyncService] Successfully cleared properties before server sync');
     } catch (clearError) {
       logger.error('[SyncService] Error clearing local properties', { error: clearError.message });
       // Continue anyway - we'll try to upsert server properties which will overwrite
