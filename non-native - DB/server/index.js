@@ -219,9 +219,14 @@ function notifyClients(event, data) {
   });
 }
 
-// Start server
-server.listen(PORT, () => {
-  logger.info(`[SERVER] Server running on http://localhost:${PORT}`);
-  logger.info(`[SERVER] WebSocket server ready on ws://localhost:${PORT}`);
+// Initialize repository and start server
+repository.initialize().then(() => {
+  server.listen(PORT, () => {
+    logger.info(`[SERVER] Server running on http://localhost:${PORT}`);
+    logger.info(`[SERVER] WebSocket server ready on ws://localhost:${PORT}`);
+  });
+}).catch((error) => {
+  logger.error('[SERVER] Failed to initialize repository', { error: error.message });
+  process.exit(1);
 });
 
