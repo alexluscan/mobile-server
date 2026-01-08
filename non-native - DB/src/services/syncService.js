@@ -216,7 +216,25 @@ export async function syncFromServer() {
     
     // Clear ALL local properties first - this ensures local DB matches server exactly
     // This is important: we want local DB to reflect server state, not merge
-    await localRepo.clearAll();
+    // Check if clearAll exists (it should be exported from indexedDbRepository)
+    if (localRepo.clearAll && typeof localRepo.clearAll === 'function') {
+      await localRepo.clearAll();
+    } else {
+      logger.error('[SyncService] clearAll function not available', { 
+        hasClearAll: !!localRepo.clearAll,
+        type: typeof localRepo.clearAll
+      });
+      // Fallback: manually clear by deleting each property
+      const localProps = await localRepo.getAll();
+      for (const prop of localProps) {
+        try {
+          await localRepo.remove(prop.id);
+        } catch (err) {
+          logger.warn('[SyncService] Error removing property during clear', { id: prop.id, error: err.message });
+        }
+      }
+      localRepo.clearCache();
+    }
     
     // Now add all server properties
     logger.debug('[SyncService] Adding server properties to local storage', { count: serverProperties.length });
