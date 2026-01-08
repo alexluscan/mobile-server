@@ -85,13 +85,39 @@ export async function syncPendingOperations() {
         switch (op.operation) {
           case 'create':
             logger.debug('[SyncService] Syncing create operation', { id: op.id, data: op.data });
-            // Extract property data without localId
+            // Extract property data without localId (localId is used to find local item)
             const { localId, ...propertyData } = op.data;
+            
+            // Send to server (without localId)
             result = await serverRepo.add(propertyData);
+            
+            logger.debug('[SyncService] Create operation synced to server', { 
+              localId, 
+              serverId: result.id,
+              property: result
+            });
+            
             // Update local storage with server-assigned ID
             if (localId) {
-              await localRepo.updateLocalId(localId, result.id);
+              try {
+                await localRepo.updateLocalId(localId, result.id);
+                logger.info('[SyncService] Successfully updated local ID', { localId, serverId: result.id });
+              } catch (updateError) {
+                // If updateLocalId fails (e.g., item already deleted or ID changed), 
+                // upsert the server property instead
+                logger.warn('[SyncService] updateLocalId failed, upserting server property', { 
+                  localId, 
+                  serverId: result.id,
+                  error: updateError.message
+                });
+                await localRepo.upsert(result);
+              }
+            } else {
+              // No localId - just upsert the server property
+              logger.debug('[SyncService] No localId, upserting server property', { serverId: result.id });
+              await localRepo.upsert(result);
             }
+            
             await offlineQueue.dequeue(op.id);
             success++;
             logger.info('[SyncService] Successfully synced create operation', { id: op.id, localId, serverId: result.id });
@@ -205,10 +231,14 @@ export function initialize() {
     if (isOnline) {
       logger.info('[SyncService] Network online - starting sync');
       try {
-        // First sync from server
-        await syncFromServer();
-        // Then sync pending operations
+        // IMPORTANT: Sync pending operations FIRST (push local changes to server)
+        // This ensures offline-created/updated/deleted items are sent before
+        // we sync from server (which might clear local data)
         await syncPendingOperations();
+        
+        // THEN sync from server (pull server changes to local)
+        // This ensures we have the latest server state after pushing local changes
+        await syncFromServer();
       } catch (error) {
         logger.error('[SyncService] Error during auto-sync', { error: error.message });
       }

@@ -95,9 +95,13 @@ export default function App() {
         // Try to sync from server if reachable
         if (isServerReachable()) {
           try {
-            logger.info('[App] Server reachable, syncing from server');
-            await syncService.syncFromServer();
+            logger.info('[App] Server reachable, starting sync');
+            // IMPORTANT: Sync pending operations FIRST (push local changes to server)
+            // This ensures offline-created/updated/deleted items are sent before
+            // we sync from server (which might clear local data)
             await syncService.syncPendingOperations();
+            // THEN sync from server (pull server changes to local)
+            await syncService.syncFromServer();
             logger.info('[App] Sync completed, reloading properties');
           } catch (syncError) {
             logger.warn('[App] Failed to sync from server, using local data', { error: syncError.message });
