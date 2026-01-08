@@ -70,11 +70,15 @@ export async function getAll() {
  */
 export async function add(propertyData) {
   try {
-    // Remove id if present - server manages IDs
-    const { id, ...propertyWithoutId } = propertyData;
+    // Remove ALL ID-related fields - server manages IDs and generates new ID based on max existing ID
+    // Remove: id, serverId, localId (all potential ID fields)
+    const { id, serverId, localId, ...propertyWithoutIds } = propertyData;
     
-    logger.info('[ServerRepo] add - Creating property on server', { property: propertyWithoutId });
-    const newProperty = await apiRequest('POST', '/properties', propertyWithoutId);
+    logger.info('[ServerRepo] add - Creating property on server', { 
+      property: propertyWithoutIds,
+      removedIds: { id, serverId, localId }
+    });
+    const newProperty = await apiRequest('POST', '/properties', propertyWithoutIds);
     logger.info('[ServerRepo] add - Success', { id: newProperty.id });
     return newProperty;
   } catch (error) {

@@ -85,10 +85,18 @@ export async function syncPendingOperations() {
         switch (op.operation) {
           case 'create':
             logger.debug('[SyncService] Syncing create operation', { id: op.id, data: op.data });
-            // Extract property data without localId (localId is used to find local item)
-            const { localId, ...propertyData } = op.data;
+            // Extract property data and remove ALL ID fields
+            // Remove localId (queue metadata), id (any existing ID), and serverId (if present)
+            // This ensures server generates a fresh ID based on its own max ID
+            const { localId, id, serverId, ...propertyData } = op.data;
             
-            // Send to server (without localId)
+            logger.debug('[SyncService] Sending create to server (no ID fields)', { 
+              localId,
+              removedIds: { id, serverId },
+              propertyData 
+            });
+            
+            // Send to server WITHOUT any ID - server will generate new ID based on max existing ID
             result = await serverRepo.add(propertyData);
             
             logger.debug('[SyncService] Create operation synced to server', { 
