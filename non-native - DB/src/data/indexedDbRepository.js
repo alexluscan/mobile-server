@@ -445,7 +445,7 @@ export async function updateLocalId(localId, serverId) {
  * Upsert property (insert or update)
  */
 export async function upsert(property) {
-  logger.debug('[Repository] upsert', { id: property.id });
+  logger.debug('[Repository] upsert', { id: property.id, title: property.title });
   
   try {
     const db = await getDB();
@@ -453,19 +453,29 @@ export async function upsert(property) {
     const objectStore = transaction.objectStore(STORE_NAME);
 
     return new Promise((resolve, reject) => {
-      const request = objectStore.put(property);
+      // Ensure serverId is set to the property id for synced items
+      const propertyToStore = { ...property, serverId: property.id };
+      
+      const request = objectStore.put(propertyToStore);
       request.onsuccess = () => {
-        // Update cache
-        const index = (propertiesCache || []).findIndex(p => p.id === property.id);
-        if (index >= 0) {
-          propertiesCache[index] = property;
-        } else {
-          propertiesCache = [...(propertiesCache || []), property];
-        }
-        observer.notify(propertiesCache);
-        resolve(property);
+        // Invalidate cache to force reload
+        propertiesCache = null;
+        isInitialized = false;
+        
+        // Reload cache and notify
+        getAll().then(updatedProperties => {
+          observer.notify(updatedProperties);
+          logger.debug('[Repository] upsert - Cache reloaded and notified', { count: updatedProperties.length });
+        }).catch(err => {
+          logger.error('[Repository] upsert - Error reloading cache', { error: err.message });
+        });
+        
+        resolve(propertyToStore);
       };
-      request.onerror = () => reject(new Error(`Failed to upsert property: ${request.error}`));
+      request.onerror = () => {
+        logger.error('[Repository] upsert - IndexedDB error', { error: request.error });
+        reject(new Error(`Failed to upsert property: ${request.error}`));
+      };
     });
   } catch (error) {
     logger.error('[Repository] upsert', { id: property.id, error: error.message });

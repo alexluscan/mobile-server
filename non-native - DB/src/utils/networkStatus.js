@@ -79,13 +79,17 @@ async function initialize() {
   // Check immediately if online
   if (isOnline) {
     await checkServerConnectivity();
+    // Notify listeners after initial check
+    notifyListeners();
   }
   
   // Periodically check server connectivity while online
   setInterval(async () => {
     if (isOnline && !serverReachable) {
+      const wasReachable = serverReachable;
       await checkServerConnectivity();
-      if (serverReachable) {
+      // Notify if status changed
+      if (wasReachable !== serverReachable) {
         notifyListeners();
       }
     }

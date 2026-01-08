@@ -150,19 +150,17 @@ export async function syncPendingOperations() {
  * Sync local data with server (initial sync)
  */
 export async function syncFromServer() {
-  if (!isNetworkOnline()) {
-    logger.debug('[SyncService] Cannot sync from server - offline');
-    throw new Error('Cannot sync from server while offline');
-  }
-
   try {
     logger.info('[SyncService] Syncing data from server');
     const serverProperties = await serverRepo.getAll();
+    
+    logger.info('[SyncService] Received properties from server', { count: serverProperties.length });
     
     // Update local storage with server data
     // This is a simple merge strategy - in production, you might want conflict resolution
     for (const serverProp of serverProperties) {
       await localRepo.upsert(serverProp);
+      logger.debug('[SyncService] Upserted property', { id: serverProp.id, title: serverProp.title });
     }
     
     logger.info('[SyncService] Successfully synced from server', { count: serverProperties.length });

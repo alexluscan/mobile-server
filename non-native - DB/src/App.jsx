@@ -5,7 +5,7 @@ import EditView from "./views/EditView";
 import * as repo from "./data/indexedDbRepository";
 import * as websocketClient from "./services/websocketClient";
 import * as syncService from "./services/syncService";
-import { isNetworkOnline, subscribeToNetworkStatus } from "./utils/networkStatus";
+import { isNetworkOnline, subscribeToNetworkStatus, checkServer, isServerReachable } from "./utils/networkStatus";
 import { subscribeToSyncStatus } from "./services/syncService";
 import { getFriendlyErrorMessage } from "./utils/errorMessages";
 import { logger } from "./utils/logger";
@@ -86,19 +86,30 @@ export default function App() {
           }
         });
         
-        // Try to sync from server if online
-        if (isNetworkOnline()) {
+        // Wait for initial server connectivity check to complete
+        await checkServer(); // Force immediate connectivity check
+        
+        // Wait a bit more for status to propagate
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Try to sync from server if reachable
+        if (isServerReachable()) {
           try {
-            logger.info('[App] Syncing from server');
+            logger.info('[App] Server reachable, syncing from server');
             await syncService.syncFromServer();
             await syncService.syncPendingOperations();
+            logger.info('[App] Sync completed, reloading properties');
           } catch (syncError) {
             logger.warn('[App] Failed to sync from server, using local data', { error: syncError.message });
             // Continue with local data
           }
+        } else {
+          logger.info('[App] Server not reachable, using local data only');
         }
         
-        // Load local data
+        // Load local data (will include synced data if sync succeeded)
+        // Clear cache first to ensure fresh data
+        repo.clearCache();
         const initialProperties = await repo.getAll();
         setProperties(initialProperties);
         logger.info('[App] Loaded properties', { count: initialProperties.length });
