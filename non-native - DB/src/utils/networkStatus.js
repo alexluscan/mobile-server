@@ -11,10 +11,13 @@ const listeners = new Set();
 
 // Listen for online/offline events
 window.addEventListener('online', async () => {
-  logger.info('[Network] Connection restored');
+  logger.info('[Network] Connection restored - checking server connectivity');
   isOnline = true;
   // Check server connectivity when network comes back
+  // Wait a bit for connection to stabilize
+  await new Promise(resolve => setTimeout(resolve, 1000));
   await checkServerConnectivity();
+  logger.info('[Network] Server connectivity check complete', { serverReachable });
   notifyListeners();
 });
 

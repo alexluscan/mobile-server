@@ -48,9 +48,14 @@ async function notifySyncStatus() {
  * Sync pending operations from offline queue
  */
 export async function syncPendingOperations() {
+  // Check network status - wait a bit if not immediately available
   if (!isNetworkOnline()) {
-    logger.debug('[SyncService] Cannot sync - offline');
-    return { success: 0, failed: 0 };
+    logger.debug('[SyncService] Cannot sync - offline or server unreachable');
+    // Wait a moment and check again (in case server just came online)
+    await new Promise(resolve => setTimeout(resolve, 500));
+    if (!isNetworkOnline()) {
+      return { success: 0, failed: 0 };
+    }
   }
 
   if (isSyncing) {
@@ -79,6 +84,12 @@ export async function syncPendingOperations() {
 
     for (const op of pendingOps) {
       try {
+        // Check network status before each operation
+        if (!isNetworkOnline()) {
+          logger.warn('[SyncService] Network went offline during sync, stopping');
+          break;
+        }
+        
         await offlineQueue.incrementAttempts(op.id);
         
         let result;
@@ -106,13 +117,21 @@ export async function syncPendingOperations() {
             });
             
             // Update local storage with server-assigned ID
+            // IMPORTANT: This must succeed before we dequeue, otherwise item will be lost
             if (localId) {
               try {
-                await localRepo.updateLocalId(localId, result.id);
-                logger.info('[SyncService] Successfully updated local ID', { localId, serverId: result.id });
+                // Check if local item still exists before updating
+                const localItem = await localRepo.getById(localId);
+                if (localItem) {
+                  await localRepo.updateLocalId(localId, result.id);
+                  logger.info('[SyncService] Successfully updated local ID', { localId, serverId: result.id });
+                } else {
+                  // Local item doesn't exist, just upsert the server property
+                  logger.warn('[SyncService] Local item not found, upserting server property', { localId, serverId: result.id });
+                  await localRepo.upsert(result);
+                }
               } catch (updateError) {
-                // If updateLocalId fails (e.g., item already deleted or ID changed), 
-                // upsert the server property instead
+                // If updateLocalId fails, upsert the server property instead
                 logger.warn('[SyncService] updateLocalId failed, upserting server property', { 
                   localId, 
                   serverId: result.id,
@@ -126,6 +145,7 @@ export async function syncPendingOperations() {
               await localRepo.upsert(result);
             }
             
+            // Only dequeue after successful sync and local update
             await offlineQueue.dequeue(op.id);
             success++;
             logger.info('[SyncService] Successfully synced create operation', { id: op.id, localId, serverId: result.id });
@@ -242,13 +262,20 @@ export function initialize() {
         // IMPORTANT: Sync pending operations FIRST (push local changes to server)
         // This ensures offline-created/updated/deleted items are sent before
         // we sync from server (which might clear local data)
-        await syncPendingOperations();
+        logger.info('[SyncService] Step 1: Syncing pending operations to server');
+        const syncResult = await syncPendingOperations();
+        logger.info('[SyncService] Pending operations sync result', syncResult);
+        
+        // Wait a moment to ensure server has processed the new items
+        await new Promise(resolve => setTimeout(resolve, 500));
         
         // THEN sync from server (pull server changes to local)
-        // This ensures we have the latest server state after pushing local changes
+        // This ensures we have the latest server state including newly synced items
+        logger.info('[SyncService] Step 2: Syncing from server to local');
         await syncFromServer();
+        logger.info('[SyncService] Sync completed successfully');
       } catch (error) {
-        logger.error('[SyncService] Error during auto-sync', { error: error.message });
+        logger.error('[SyncService] Error during auto-sync', { error: error.message, stack: error.stack });
       }
     }
   });
