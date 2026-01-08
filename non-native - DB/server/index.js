@@ -127,9 +127,61 @@ app.delete('/api/properties/:id', async (req, res) => {
   }
 });
 
+// Root route
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Property Management API',
+    version: '1.0.0',
+    endpoints: {
+      health: '/health',
+      properties: '/api/properties',
+      propertiesById: '/api/properties/:id'
+    },
+    websocket: 'ws://' + req.get('host'),
+    note: 'All API endpoints are under /api prefix'
+  });
+});
+
+// Redirect /properties to /api/properties for convenience
+app.get('/properties', (req, res) => {
+  res.redirect(301, '/api/properties');
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// 404 handler for undefined routes
+app.use((req, res) => {
+  logger.debug(`[SERVER] 404 - Route not found: ${req.method} ${req.path}`);
+  
+  // Check if user forgot /api prefix
+  const suggestedPath = req.path.startsWith('/api') ? null : `/api${req.path}`;
+  
+  const response = {
+    error: 'Route not found',
+    path: req.path,
+    method: req.method,
+    availableEndpoints: [
+      'GET /',
+      'GET /health',
+      'GET /properties (redirects to /api/properties)',
+      'GET /api/properties',
+      'GET /api/properties/:id',
+      'POST /api/properties',
+      'PUT /api/properties/:id',
+      'DELETE /api/properties/:id'
+    ]
+  };
+  
+  // Add suggestion if path looks like it's missing /api prefix
+  if (suggestedPath) {
+    response.suggestion = `Did you mean: ${suggestedPath}?`;
+    response.note = 'All API endpoints require /api prefix (except /properties which redirects)';
+  }
+  
+  res.status(404).json(response);
 });
 
 // Create HTTP server

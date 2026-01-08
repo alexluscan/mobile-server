@@ -51,6 +51,9 @@ your-project/
 
 **Important Settings:**
 - ✅ **Enable WebSocket**: Check this box! (Critical for real-time updates)
+  - ⚠️ **Note**: WebSocket is ONLY for the **Web Service (backend)**, NOT for Static Site (frontend)
+  - Static Sites are just files - they can't run WebSocket servers
+  - The frontend (Static Site) will CONNECT to the backend's WebSocket
 - **Auto-Deploy**: Yes (deploys on every push)
 
 **Environment Variables** (Click "Advanced"):
@@ -88,7 +91,9 @@ PORT=10000
 - **Branch**: `main` (same as backend)
 
 **Build Settings:**
-- **Build Command**: `npm install && npm run build`
+- **Build Command**: `npm install --include=dev && npm run build`
+  - OR: `NODE_ENV=development npm install && npm run build`
+  - OR: `npm ci && npm run build` (if you have package-lock.json)
 - **Publish Directory**: `dist`
 
 **Environment Variables** (Click "Add Environment Variable"):

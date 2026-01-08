@@ -38,21 +38,35 @@ async function checkServerConnectivity() {
     // Get base URL (with or without /api)
     const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
     // Extract base URL without /api for health check
-    const baseUrl = API_BASE_URL.replace('/api', '');
+    const baseUrl = API_BASE_URL.replace('/api', '').replace(/\/$/, ''); // Remove trailing slash
+    
+    logger.debug('[Network] Checking server connectivity', { baseUrl });
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    
     const response = await fetch(`${baseUrl}/health`, {
       method: 'GET',
       cache: 'no-cache',
-      signal: AbortSignal.timeout(3000) // 3 second timeout
+      mode: 'cors',
+      signal: controller.signal
     });
     
+    clearTimeout(timeoutId);
+    
     serverReachable = response.ok;
-    logger.debug('[Network] Server connectivity check', { 
+    logger.info('[Network] Server connectivity check', { 
       reachable: serverReachable,
-      status: response.status 
+      status: response.status,
+      url: `${baseUrl}/health`
     });
   } catch (error) {
     serverReachable = false;
-    logger.debug('[Network] Server not reachable', { error: error.message });
+    const errorMsg = error.name === 'AbortError' ? 'Request timeout' : error.message;
+    logger.warn('[Network] Server not reachable', { 
+      error: errorMsg,
+      apiUrl: import.meta.env.VITE_API_URL || 'http://localhost:3001/api'
+    });
   }
   
   return serverReachable;
