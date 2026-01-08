@@ -168,25 +168,38 @@ export async function add(property) {
           // Notify observers
           observer.notify(propertiesCache);
           
-          // Try to sync with server if online
-          if (isNetworkOnline()) {
-            try {
-              logger.debug('[Repository] add - Syncing with server', { localId });
-              const serverProperty = await serverRepo.add(property);
-              // Update local storage with server ID
-              await updateLocalId(localId, serverProperty.id);
-              logger.info('[Repository] add - Successfully synced with server', { localId, serverId: serverProperty.id });
-              resolve(await getById(serverProperty.id));
-            } catch (serverError) {
-              logger.warn('[Repository] add - Failed to sync with server, queuing', { localId, error: serverError.message });
-              // Queue for later sync
-              await offlineQueue.enqueue('create', { ...property, localId });
-              resolve(propertyWithLocalId);
-            }
-          } else {
-            logger.debug('[Repository] add - Offline, queuing operation', { localId });
-            // Queue for later sync
+          // Always try to sync with server immediately
+          // Don't check isNetworkOnline() first - try sync and let it fail if server is down
+          try {
+            logger.debug('[Repository] add - Attempting to sync with server', { localId });
+            const serverProperty = await serverRepo.add(property);
+            
+            // Successfully synced - update local storage with server ID
+            logger.info('[Repository] add - Successfully synced with server', { 
+              localId, 
+              serverId: serverProperty.id,
+              title: serverProperty.title 
+            });
+            
+            const updatedProperty = await updateLocalId(localId, serverProperty.id);
+            
+            // updateLocalId already notifies observers, but ensure we return the right property
+            logger.info('[Repository] add - Property created and synced', { 
+              localId, 
+              serverId: serverProperty.id,
+              finalId: updatedProperty?.id,
+              title: updatedProperty?.title 
+            });
+            resolve(updatedProperty || propertyWithLocalId);
+          } catch (serverError) {
+            // Sync failed - queue for later but property is already visible in UI
+            logger.warn('[Repository] add - Server sync failed, queuing for retry', { 
+              localId, 
+              error: serverError.message,
+              errorStack: serverError.stack
+            });
             await offlineQueue.enqueue('create', { ...property, localId });
+            // Resolve with local property - it's already visible via observer notification above
             resolve(propertyWithLocalId);
           }
         } catch (error) {
@@ -406,13 +419,21 @@ export async function updateLocalId(localId, serverId) {
   logger.debug('[Repository] updateLocalId', { localId, serverId });
   
   try {
-    const property = await getById(localId);
+    // Try cache first (faster)
+    let property = propertiesCache?.find(p => p.id === localId);
+    
+    // If not in cache, get from IndexedDB
+    if (!property) {
+      property = await getById(localId);
+    }
+    
     if (!property) {
       logger.warn('[Repository] updateLocalId - Property not found', { localId });
-      return;
+      throw new Error(`Property with local ID ${localId} not found`);
     }
 
-    const updatedProperty = { ...property, serverId, id: serverId };
+    // Ensure ID is string to match server format
+    const updatedProperty = { ...property, serverId, id: String(serverId) };
     const db = await getDB();
     const transaction = db.transaction([STORE_NAME], 'readwrite');
     const objectStore = transaction.objectStore(STORE_NAME);
@@ -458,16 +479,21 @@ export async function upsert(property) {
       
       const request = objectStore.put(propertyToStore);
       request.onsuccess = () => {
-        // Invalidate cache to force reload
-        propertiesCache = null;
-        isInitialized = false;
+        // Update cache immediately
+        const existingIndex = (propertiesCache || []).findIndex(p => p.id === propertyToStore.id);
+        if (existingIndex >= 0) {
+          propertiesCache[existingIndex] = propertyToStore;
+        } else {
+          propertiesCache = [...(propertiesCache || []), propertyToStore];
+        }
         
-        // Reload cache and notify
-        getAll().then(updatedProperties => {
-          observer.notify(updatedProperties);
-          logger.debug('[Repository] upsert - Cache reloaded and notified', { count: updatedProperties.length });
-        }).catch(err => {
-          logger.error('[Repository] upsert - Error reloading cache', { error: err.message });
+        // Notify observers immediately
+        observer.notify(propertiesCache);
+        
+        logger.debug('[Repository] upsert - Property stored and cache updated', { 
+          id: propertyToStore.id,
+          title: propertyToStore.title,
+          cacheCount: propertiesCache.length
         });
         
         resolve(propertyToStore);

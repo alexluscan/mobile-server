@@ -156,15 +156,37 @@ export async function syncFromServer() {
     
     logger.info('[SyncService] Received properties from server', { count: serverProperties.length });
     
-    // Update local storage with server data
-    // This is a simple merge strategy - in production, you might want conflict resolution
+    // Get count of local properties before clearing
+    const localPropertiesBefore = await localRepo.getAll();
+    logger.debug('[SyncService] Local properties before sync', { count: localPropertiesBefore.length });
+    
+    // Clear ALL local properties first - this ensures local DB matches server exactly
+    // This is important: we want local DB to reflect server state, not merge
+    await localRepo.clearAll();
+    
+    // Now add all server properties
+    logger.debug('[SyncService] Adding server properties to local storage', { count: serverProperties.length });
     for (const serverProp of serverProperties) {
-      await localRepo.upsert(serverProp);
-      logger.debug('[SyncService] Upserted property', { id: serverProp.id, title: serverProp.title });
+      try {
+        await localRepo.upsert(serverProp);
+        logger.debug('[SyncService] Upserted property', { id: serverProp.id, title: serverProp.title });
+      } catch (upsertError) {
+        logger.error('[SyncService] Error upserting property', { 
+          id: serverProp.id, 
+          error: upsertError.message 
+        });
+      }
     }
     
-    logger.info('[SyncService] Successfully synced from server', { count: serverProperties.length });
-    return serverProperties;
+    // Reload all properties after sync to ensure cache is updated
+    localRepo.clearCache(); // Clear cache to force reload
+    const syncedProperties = await localRepo.getAll();
+    logger.info('[SyncService] Successfully synced from server', { 
+      serverCount: serverProperties.length,
+      localCountBefore: localPropertiesBefore.length,
+      localCountAfter: syncedProperties.length
+    });
+    return syncedProperties;
   } catch (error) {
     logger.error('[SyncService] Error syncing from server', { error: error.message });
     throw error;
