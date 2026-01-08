@@ -1,0 +1,175 @@
+import express from 'express';
+import cors from 'cors';
+import { createServer } from 'http';
+import { WebSocketServer } from 'ws';
+import * as repository from './repository.js';
+import { logger } from './logger.js';
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Debug logging middleware
+app.use((req, res, next) => {
+  logger.debug(`[HTTP] ${req.method} ${req.path}`, { 
+    body: req.body,
+    query: req.query,
+    params: req.params 
+  });
+  next();
+});
+
+// GET all properties
+app.get('/api/properties', async (req, res) => {
+  try {
+    logger.info('[SERVER] GET /api/properties - Fetching all properties');
+    const properties = await repository.getAll();
+    logger.debug('[SERVER] GET /api/properties - Success', { count: properties.length });
+    res.json(properties);
+  } catch (error) {
+    logger.error('[SERVER] GET /api/properties - Error', { error: error.message });
+    res.status(500).json({ error: 'Failed to fetch properties' });
+  }
+});
+
+// GET property by ID
+app.get('/api/properties/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    logger.info(`[SERVER] GET /api/properties/${id} - Fetching property`);
+    const property = await repository.getById(id);
+    if (!property) {
+      logger.debug(`[SERVER] GET /api/properties/${id} - Not found`);
+      return res.status(404).json({ error: 'Property not found' });
+    }
+    logger.debug(`[SERVER] GET /api/properties/${id} - Success`);
+    res.json(property);
+  } catch (error) {
+    logger.error(`[SERVER] GET /api/properties/${req.params.id} - Error`, { error: error.message });
+    res.status(500).json({ error: 'Failed to fetch property' });
+  }
+});
+
+// CREATE property
+app.post('/api/properties', async (req, res) => {
+  try {
+    const propertyData = req.body;
+    logger.info('[SERVER] POST /api/properties - Creating property', { property: propertyData });
+    
+    // Remove id if present - server manages IDs
+    const { id, ...propertyWithoutId } = propertyData;
+    
+    const newProperty = await repository.add(propertyWithoutId);
+    logger.debug('[SERVER] POST /api/properties - Success', { id: newProperty.id });
+    
+    // Notify WebSocket clients
+    notifyClients('created', newProperty);
+    
+    res.status(201).json(newProperty);
+  } catch (error) {
+    logger.error('[SERVER] POST /api/properties - Error', { error: error.message });
+    res.status(400).json({ error: 'Failed to create property', details: error.message });
+  }
+});
+
+// UPDATE property
+app.put('/api/properties/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const propertyData = req.body;
+    logger.info(`[SERVER] PUT /api/properties/${id} - Updating property`, { property: propertyData });
+    
+    // Ensure ID matches URL
+    const updatedProperty = { ...propertyData, id };
+    
+    const result = await repository.update(updatedProperty);
+    if (!result) {
+      logger.debug(`[SERVER] PUT /api/properties/${id} - Not found`);
+      return res.status(404).json({ error: 'Property not found' });
+    }
+    
+    logger.debug(`[SERVER] PUT /api/properties/${id} - Success`);
+    
+    // Notify WebSocket clients
+    notifyClients('updated', result);
+    
+    res.json(result);
+  } catch (error) {
+    logger.error(`[SERVER] PUT /api/properties/${req.params.id} - Error`, { error: error.message });
+    res.status(400).json({ error: 'Failed to update property', details: error.message });
+  }
+});
+
+// DELETE property
+app.delete('/api/properties/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    logger.info(`[SERVER] DELETE /api/properties/${id} - Deleting property`);
+    
+    const deleted = await repository.remove(id);
+    if (!deleted) {
+      logger.debug(`[SERVER] DELETE /api/properties/${id} - Not found`);
+      return res.status(404).json({ error: 'Property not found' });
+    }
+    
+    logger.debug(`[SERVER] DELETE /api/properties/${id} - Success`);
+    
+    // Notify WebSocket clients
+    notifyClients('deleted', { id });
+    
+    res.json({ id, deleted: true });
+  } catch (error) {
+    logger.error(`[SERVER] DELETE /api/properties/${req.params.id} - Error`, { error: error.message });
+    res.status(500).json({ error: 'Failed to delete property' });
+  }
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// Create HTTP server
+const server = createServer(app);
+
+// WebSocket Server
+const wss = new WebSocketServer({ server });
+
+// Store WebSocket clients
+const clients = new Set();
+
+wss.on('connection', (ws) => {
+  clients.add(ws);
+  logger.info(`[SERVER] WebSocket client connected (total: ${clients.size})`);
+  
+  ws.on('close', () => {
+    clients.delete(ws);
+    logger.info(`[SERVER] WebSocket client disconnected (total: ${clients.size})`);
+  });
+  
+  ws.on('error', (error) => {
+    logger.error('[SERVER] WebSocket error', { error: error.message });
+  });
+});
+
+// Notify all connected clients
+function notifyClients(event, data) {
+  const message = JSON.stringify({ event, data });
+  logger.debug('[SERVER] Broadcasting WebSocket message', { event, dataId: data.id || data?.id });
+  
+  clients.forEach((client) => {
+    if (client.readyState === 1) { // WebSocket.OPEN
+      client.send(message);
+    }
+  });
+}
+
+// Start server
+server.listen(PORT, () => {
+  logger.info(`[SERVER] Server running on http://localhost:${PORT}`);
+  logger.info(`[SERVER] WebSocket server ready on ws://localhost:${PORT}`);
+});
+
