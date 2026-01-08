@@ -44,24 +44,119 @@ async function loadData() {
     }
     
     logger.debug('[REPOSITORY] Loading data from file', { filePath: DATA_FILE });
-    const data = await fs.readFile(DATA_FILE, 'utf-8');
-    const parsed = JSON.parse(data);
     
-    // Support both old format (just array) and new format (object with properties)
-    if (Array.isArray(parsed)) {
-      properties = parsed;
-    } else {
-      properties = parsed.properties || [];
+    // Check if target file exists
+    let fileExists = false;
+    try {
+      await fs.access(DATA_FILE);
+      fileExists = true;
+    } catch (accessError) {
+      fileExists = false;
     }
     
-    logger.debug('[REPOSITORY] Parsed data', { 
-      propertyCount: properties.length,
-      firstProperty: properties[0]?.title || 'none'
-    });
+    // If file doesn't exist and we're using persistent disk, try to migrate from old location
+    if (!fileExists && USE_PERSISTENT_DISK) {
+      const oldDataFile = join(__dirname, 'data.json');
+      logger.info('[REPOSITORY] Persistent disk file not found, checking for old data file', { 
+        oldPath: oldDataFile,
+        newPath: DATA_FILE
+      });
+      
+      try {
+        const oldData = await fs.readFile(oldDataFile, 'utf-8');
+        const oldParsed = JSON.parse(oldData);
+        const oldProperties = Array.isArray(oldParsed) ? oldParsed : (oldParsed.properties || []);
+        
+        if (oldProperties.length > 0) {
+          logger.info('[REPOSITORY] Found old data file with properties, migrating to persistent disk', { 
+            count: oldProperties.length,
+            oldPath: oldDataFile,
+            newPath: DATA_FILE
+          });
+          
+          // Load old data
+          properties = oldProperties;
+          
+          // Save to new location
+          await saveData();
+          
+          logger.info('[REPOSITORY] Successfully migrated data to persistent disk');
+          
+          // Continue with normal processing (calculate nextId, etc.)
+        } else {
+          logger.info('[REPOSITORY] Old data file exists but is empty, starting fresh');
+          properties = [];
+          nextId = 1;
+          await saveData();
+        }
+      } catch (migrateError) {
+        if (migrateError.code === 'ENOENT') {
+          logger.info('[REPOSITORY] No old data file found either, starting fresh');
+          properties = [];
+          nextId = 1;
+          await saveData();
+        } else {
+          logger.warn('[REPOSITORY] Error migrating old data', { error: migrateError.message });
+          properties = [];
+          nextId = 1;
+          await saveData();
+        }
+      }
+    } else if (!fileExists) {
+      // File doesn't exist and not using persistent disk, start fresh
+      properties = [];
+      nextId = 1;
+      logger.info('[REPOSITORY] No data file found, starting fresh', { filePath: DATA_FILE });
+      await saveData(); // Create empty file
+    } else {
+      // File exists, load it normally
+      const data = await fs.readFile(DATA_FILE, 'utf-8');
+      const parsed = JSON.parse(data);
+      
+      // Support both old format (just array) and new format (object with properties)
+      if (Array.isArray(parsed)) {
+        properties = parsed;
+      } else {
+        properties = parsed.properties || [];
+      }
+      
+      logger.debug('[REPOSITORY] Parsed data', { 
+        propertyCount: properties.length,
+        firstProperty: properties[0]?.title || 'none'
+      });
+      
+      // Calculate nextId from existing properties
+      // Handle both numeric and string IDs
+      if (properties.length > 0) {
+        const ids = properties
+          .map(p => {
+            const id = p.id ? parseInt(String(p.id), 10) : 0;
+            return isNaN(id) ? 0 : id;
+          })
+          .filter(id => id > 0);
+        
+        nextId = ids.length > 0 ? Math.max(...ids) + 1 : 1;
+        logger.debug('[REPOSITORY] Calculated nextId', { 
+          nextId, 
+          propertyCount: properties.length,
+          maxId: ids.length > 0 ? Math.max(...ids) : 0
+        });
+      } else {
+        nextId = 1;
+      }
+      
+      logger.info('[REPOSITORY] Loaded data from file', { 
+        count: properties.length,
+        nextId,
+        filePath: DATA_FILE
+      });
+    }
     
-    // Calculate nextId from existing properties
-    // Handle both numeric and string IDs
-    if (properties.length > 0) {
+    // Final check: if properties array is empty but we didn't migrate, calculate nextId
+    if (properties.length === 0 && fileExists) {
+      nextId = 1;
+    } else if (properties.length > 0 && nextId === 1) {
+      // Recalculate nextId if we just loaded properties
       const ids = properties
         .map(p => {
           const id = p.id ? parseInt(String(p.id), 10) : 0;
@@ -69,36 +164,20 @@ async function loadData() {
         })
         .filter(id => id > 0);
       
-      nextId = ids.length > 0 ? Math.max(...ids) + 1 : 1;
-      logger.debug('[REPOSITORY] Calculated nextId', { 
-        nextId, 
-        propertyCount: properties.length,
-        maxId: ids.length > 0 ? Math.max(...ids) : 0
-      });
-    } else {
-      nextId = 1;
+      if (ids.length > 0) {
+        nextId = Math.max(...ids) + 1;
+        logger.debug('[REPOSITORY] Recalculated nextId after migration', { nextId, maxId: Math.max(...ids) });
+      }
     }
     
-    logger.info('[REPOSITORY] Loaded data from file', { 
-      count: properties.length,
-      nextId,
-      filePath: DATA_FILE
-    });
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      // File doesn't exist yet, start fresh
-      properties = [];
-      nextId = 1;
-      logger.info('[REPOSITORY] No data file found, starting fresh', { filePath: DATA_FILE });
-      await saveData(); // Create empty file
-    } else {
-      logger.error('[REPOSITORY] Error loading data', { 
-        error: error.message,
-        filePath: DATA_FILE,
-        code: error.code
-      });
-      throw error;
-    }
+    logger.error('[REPOSITORY] Error loading data', { 
+      error: error.message,
+      filePath: DATA_FILE,
+      code: error.code,
+      stack: error.stack
+    });
+    throw error;
   }
 }
 

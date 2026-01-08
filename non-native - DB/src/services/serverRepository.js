@@ -34,6 +34,8 @@ async function apiRequest(method, endpoint, data = null) {
       const error = new Error(errorData.error || `HTTP ${response.status}`);
       error.status = response.status;
       error.details = errorData.details;
+      // Preserve original error message for 404 checks
+      error.originalMessage = errorData.error || error.message;
       throw error;
     }
 
@@ -41,10 +43,18 @@ async function apiRequest(method, endpoint, data = null) {
     logger.debug(`[ServerRepo] ${method} ${endpoint} - Success`, { result });
     return result;
   } catch (error) {
-    logger.error(`[ServerRepo] ${method} ${endpoint} - Error`, { 
-      error: error.message,
-      status: error.status 
-    });
+    // Don't log 404 errors as errors in apiRequest - let the caller handle it
+    if (error.status !== 404) {
+      logger.error(`[ServerRepo] ${method} ${endpoint} - Error`, { 
+        error: error.message,
+        status: error.status 
+      });
+    } else {
+      logger.debug(`[ServerRepo] ${method} ${endpoint} - Not found (404)`, { 
+        error: error.message,
+        status: error.status 
+      });
+    }
     throw error;
   }
 }
@@ -111,20 +121,48 @@ export async function update(property) {
 /**
  * DELETE: Delete a property from the server
  * Only sends the ID
+ * DELETE is idempotent - if property doesn't exist (404), consider it successful
  */
 export async function remove(id) {
-  try {
-    if (!id) {
-      throw new Error('Property ID is required for deletion');
-    }
-    
-    logger.info(`[ServerRepo] remove - Deleting property ${id} from server`);
-    await apiRequest('DELETE', `/properties/${id}`);
-    logger.info(`[ServerRepo] remove - Success`, { id });
-    return { id };
-  } catch (error) {
-    const friendlyMessage = logError('remove (server)', error, { id });
-    throw new Error(friendlyMessage);
+  if (!id) {
+    throw new Error('Property ID is required for deletion');
   }
+  
+  logger.info(`[ServerRepo] remove - Deleting property ${id} from server`);
+  
+    try {
+      await apiRequest('DELETE', `/properties/${id}`);
+      logger.info(`[ServerRepo] remove - Success`, { id });
+      return { id };
+    } catch (error) {
+      // DELETE is idempotent - if property doesn't exist (404), it's already deleted
+      // Check status code first (most reliable)
+      if (error.status === 404) {
+        logger.info(`[ServerRepo] remove - Property ${id} not found on server (already deleted)`, { 
+          id,
+          status: error.status
+        });
+        return { id, alreadyDeleted: true };
+      }
+      
+      // Also check error message and details (in case status isn't set)
+      const errorMsg = (error.message || '').toLowerCase();
+      const errorDetails = (error.details || '').toLowerCase();
+      const isNotFound = errorMsg.includes('not found') || 
+                         errorMsg.includes('404') ||
+                         errorDetails.includes('not found');
+      
+      if (isNotFound) {
+        logger.info(`[ServerRepo] remove - Property ${id} not found on server (already deleted)`, { 
+          id,
+          message: error.message
+        });
+        return { id, alreadyDeleted: true };
+      }
+      
+      // For other errors, log and throw friendly error
+      const friendlyMessage = logError('remove (server)', error, { id });
+      throw new Error(friendlyMessage);
+    }
 }
 

@@ -161,10 +161,26 @@ export async function syncPendingOperations() {
 
           case 'delete':
             logger.debug('[SyncService] Syncing delete operation', { id: op.id, data: op.data });
-            result = await serverRepo.remove(op.data.id);
-            await offlineQueue.dequeue(op.id);
-            success++;
-            logger.info('[SyncService] Successfully synced delete operation', { id: op.id });
+            try {
+              result = await serverRepo.remove(op.data.id);
+              // DELETE is idempotent - if property doesn't exist (404), it's already deleted
+              if (result.alreadyDeleted) {
+                logger.info('[SyncService] Delete operation - property already deleted on server', { id: op.id, serverId: op.data.id });
+              } else {
+                logger.info('[SyncService] Successfully synced delete operation', { id: op.id });
+              }
+              await offlineQueue.dequeue(op.id);
+              success++;
+            } catch (deleteError) {
+              // If 404 (already deleted), treat as success
+              if (deleteError.message.includes('not found') || deleteError.message.includes('404')) {
+                logger.info('[SyncService] Delete operation - property not found (already deleted)', { id: op.id, serverId: op.data.id });
+                await offlineQueue.dequeue(op.id);
+                success++;
+              } else {
+                throw deleteError; // Re-throw other errors
+              }
+            }
             break;
 
           default:
@@ -216,24 +232,83 @@ export async function syncFromServer() {
     
     // Clear ALL local properties first - this ensures local DB matches server exactly
     // This is important: we want local DB to reflect server state, not merge
-    // Check if clearAll exists (it should be exported from indexedDbRepository)
-    if (localRepo.clearAll && typeof localRepo.clearAll === 'function') {
-      await localRepo.clearAll();
-    } else {
-      logger.error('[SyncService] clearAll function not available', { 
-        hasClearAll: !!localRepo.clearAll,
-        type: typeof localRepo.clearAll
-      });
-      // Fallback: manually clear by deleting each property
-      const localProps = await localRepo.getAll();
-      for (const prop of localProps) {
-        try {
-          await localRepo.remove(prop.id);
-        } catch (err) {
-          logger.warn('[SyncService] Error removing property during clear', { id: prop.id, error: err.message });
+    logger.debug('[SyncService] Clearing all local properties before server sync');
+    
+    try {
+      // Check if clearAll exists (it should be exported from indexedDbRepository)
+      if (localRepo.clearAll && typeof localRepo.clearAll === 'function') {
+        await localRepo.clearAll();
+        logger.debug('[SyncService] Successfully cleared all properties using clearAll');
+      } else {
+        // Fallback: manually clear by deleting each property from IndexedDB directly
+        logger.info('[SyncService] clearAll not available, using fallback method');
+        
+        const localProps = await localRepo.getAll();
+        logger.debug('[SyncService] Found local properties to clear', { count: localProps.length });
+        
+        if (localProps.length > 0) {
+          // Direct IndexedDB access to clear without syncing to server
+          try {
+            const dbName = 'PropertyDB';
+            const storeName = 'properties';
+            
+            // Open IndexedDB directly
+            const dbRequest = indexedDB.open(dbName, 2);
+            await new Promise((resolve, reject) => {
+              dbRequest.onsuccess = () => {
+                const db = dbRequest.result;
+                const transaction = db.transaction([storeName], 'readwrite');
+                const objectStore = transaction.objectStore(storeName);
+                
+                // Delete each property
+                let deleted = 0;
+                let errors = 0;
+                
+                for (const prop of localProps) {
+                  const deleteRequest = objectStore.delete(prop.id);
+                  deleteRequest.onsuccess = () => deleted++;
+                  deleteRequest.onerror = () => {
+                    errors++;
+                    logger.warn('[SyncService] Error deleting property during clear', { id: prop.id });
+                  };
+                }
+                
+                transaction.oncomplete = () => {
+                  logger.info('[SyncService] Fallback clear completed', { deleted, errors, total: localProps.length });
+                  resolve();
+                };
+                
+                transaction.onerror = () => {
+                  logger.error('[SyncService] Transaction error during clear', { error: transaction.error });
+                  reject(transaction.error);
+                };
+              };
+              
+              dbRequest.onerror = () => {
+                logger.error('[SyncService] Failed to open IndexedDB for clear', { error: dbRequest.error });
+                reject(dbRequest.error);
+              };
+            });
+          } catch (indexedDbError) {
+            logger.warn('[SyncService] Direct IndexedDB clear failed, using remove method', { error: indexedDbError.message });
+            // Last resort: use remove method (will sync to server, but that's okay since we're clearing anyway)
+            for (const prop of localProps) {
+              try {
+                await localRepo.remove(prop.id);
+              } catch (err) {
+                logger.warn('[SyncService] Error removing property during clear', { id: prop.id, error: err.message });
+              }
+            }
+          }
         }
+        
+        // Clear cache
+        localRepo.clearCache();
+        logger.info('[SyncService] Successfully cleared properties using fallback method');
       }
-      localRepo.clearCache();
+    } catch (clearError) {
+      logger.error('[SyncService] Error clearing local properties', { error: clearError.message });
+      // Continue anyway - we'll try to upsert server properties which will overwrite
     }
     
     // Now add all server properties
