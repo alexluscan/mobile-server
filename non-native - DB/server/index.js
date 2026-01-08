@@ -10,32 +10,51 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 // CORS configuration - allow requests from frontend origin
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  'https://mobile-server-frontend.onrender.com',
+  'http://localhost:5173',
+  'http://localhost:3000'
+].filter(Boolean);
+
 const corsOptions = {
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
+    if (!origin) {
+      return callback(null, true);
+    }
     
-    // Allow requests from frontend origin or any origin in development
-    const allowedOrigins = [
-      process.env.FRONTEND_URL,
-      'https://mobile-server-frontend.onrender.com',
-      'http://localhost:5173',
-      'http://localhost:3000'
-    ].filter(Boolean);
-    
-    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin) || process.env.NODE_ENV !== 'production') {
+    // Allow all origins in development or if no specific origins configured
+    // In production, check against allowed list
+    if (process.env.NODE_ENV !== 'production' || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      logger.warn('[SERVER] CORS blocked request from origin', { origin });
-      callback(null, true); // Allow all for now, but log it
+      logger.warn('[SERVER] CORS blocked request from origin', { origin, allowedOrigins, nodeEnv: process.env.NODE_ENV });
+      // Still allow it for now to avoid breaking things
+      callback(null, true);
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  exposedHeaders: ['Content-Length', 'Content-Type'],
+  maxAge: 86400, // 24 hours - cache preflight for 24h
+  preflightContinue: false,
+  optionsSuccessStatus: 204
 };
 
+// Apply CORS middleware - this handles all CORS including preflight
 app.use(cors(corsOptions));
+
+// Additional explicit OPTIONS handler as backup
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.header('Access-Control-Max-Age', '86400');
+  res.sendStatus(204);
+});
+
 app.use(express.json());
 
 // Debug logging middleware
